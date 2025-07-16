@@ -69,7 +69,7 @@ impl AppTrait for App {
         let (req, ctx) = SenderBuilder::new(psbt, uri.clone())
             .build_recommended(fee_rate)
             .with_context(|| "Failed to build payjoin request")?
-            .extract_v1();
+            .create_v1_post_request();
         let http = http_agent()?;
         let body = String::from_utf8(req.body.clone()).unwrap();
         println!("Sending fallback request to {}", &req.url);
@@ -296,13 +296,13 @@ impl App {
     ) -> Result<PayjoinProposal, ReplyableError> {
         let wallet = self.wallet();
 
-        // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
-        let _to_broadcast_in_failure_case = proposal.extract_tx_to_schedule_broadcast();
-
         // Receive Check 1: Can Broadcast
         let proposal =
             proposal.check_broadcast_suitability(None, |tx| Ok(wallet.can_broadcast(tx)?))?;
         log::trace!("check1");
+
+        // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
+        let _to_broadcast_in_failure_case = proposal.extract_tx_to_schedule_broadcast();
 
         // Receive Check 2: receiver can't sign for proposal inputs
         let proposal = proposal.check_inputs_not_owned(|input| Ok(wallet.is_mine(input)?))?;

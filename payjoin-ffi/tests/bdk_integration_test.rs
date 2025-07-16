@@ -219,10 +219,10 @@ mod v2 {
 
     use bdk::wallet::AddressIndex;
     use bitcoin_ffi::{Address, Network};
-    use payjoin_ffi::receive::{NewReceiver, PayjoinProposal, UncheckedProposal, WithContext};
-    use payjoin_ffi::send::{WithReplyKey, SenderBuilder};
+    use payjoin_ffi::receive::{PayjoinProposal, UncheckedProposal, UninitializedReceiver};
+    use payjoin_ffi::send::SenderBuilder;
     use payjoin_ffi::uri::Uri;
-    use payjoin_ffi::{NoopPersister, Request};
+    use payjoin_ffi::{NoopSessionPersister, Request};
     use payjoin_test_utils::TestServices;
 
     use super::*;
@@ -254,17 +254,19 @@ mod v2 {
             .await?;
 
             let address = receiver.get_address(AddressIndex::New);
-            let new_session = NewReceiver::new(
+            let recv_session_persister = NoopSessionPersister::default();
+            let sender_session_persister = NoopSessionPersister::default();
+            let session = UninitializedReceiver::create_session(
                 Address::new(address.to_string(), Network::Regtest).unwrap(),
                 directory.to_string(),
                 ohttp_keys,
                 None,
-            )?;
-            let receiver_token = new_session.persist(&mut NoopPersister)?;
-            let session = WithContext::load(receiver_token, &NoopPersister)?;
+            )
+            .save(&recv_session_persister)?;
             let ohttp_relay = services.ohttp_relay_url();
             // Poll receive request
-            let (request, client_response) = session.extract_req(ohttp_relay.to_string())?;
+            let (request, client_response) =
+                session.create_poll_request(ohttp_relay.to_string())?;
             let response = agent
                 .post(request.url.as_string())
                 .header("Content-Type", request.content_type)
@@ -272,8 +274,10 @@ mod v2 {
                 .send()
                 .await?;
             assert!(response.status().is_success());
-            let response_body =
-                session.process_res(&response.bytes().await?, &client_response).unwrap();
+            let response_body = session
+                .process_response(&response.bytes().await?, &client_response)
+                .save(&recv_session_persister)
+                .unwrap();
             // No proposal yet since sender has not responded
             assert!(response_body.is_none());
 
@@ -285,11 +289,11 @@ mod v2 {
             let psbt = build_original_psbt(&sender, &pj_uri)?;
             println!("\nOriginal sender psbt: {:#?}", psbt.to_string());
 
-            let new_sender = SenderBuilder::new(psbt.to_string(), pj_uri)?
-                .build_recommended(payjoin::bitcoin::FeeRate::BROADCAST_MIN.to_sat_per_kwu())?;
-            let sender_token = new_sender.persist(&mut NoopPersister)?;
-            let req_ctx = WithReplyKey::load(sender_token, &NoopPersister)?;
-            let (request, context) = req_ctx.extract_v2(ohttp_relay.to_owned().into())?;
+            let req_ctx = SenderBuilder::new(psbt.to_string(), pj_uri)?
+                .build_recommended(payjoin::bitcoin::FeeRate::BROADCAST_MIN.to_sat_per_kwu())
+                .save(&sender_session_persister)?;
+            let (request, context) =
+                req_ctx.create_v2_post_request(ohttp_relay.to_owned().into())?;
             let response = agent
                 .post(request.url.as_string())
                 .header("Content-Type", request.content_type)
@@ -298,13 +302,16 @@ mod v2 {
                 .await
                 .unwrap();
             assert!(response.status().is_success());
-            let send_ctx = context.process_response(&response.bytes().await?)?;
+            let send_ctx = req_ctx
+                .process_response(&response.bytes().await?, context)
+                .save(&sender_session_persister)?;
 
             // **********************
             // Inside the Receiver:
 
             // GET fallback psbt
-            let (request, client_response) = session.extract_req(ohttp_relay.to_string())?;
+            let (request, client_response) =
+                session.create_poll_request(ohttp_relay.to_string())?;
             let response = agent
                 .post(request.url.as_string())
                 .header("Content-Type", request.content_type)
@@ -312,62 +319,79 @@ mod v2 {
                 .send()
                 .await?;
             let proposal = session
-                .process_res(&response.bytes().await?, &client_response)?
+                .process_response(&response.bytes().await?, &client_response)
+                .save(&recv_session_persister)?
+                .success()
                 .expect("proposal should exist");
             let payjoin_proposal = handle_directory_proposal(receiver, proposal);
             let (request, client_response) =
-                payjoin_proposal.extract_req(ohttp_relay.to_string())?;
+                payjoin_proposal.create_post_request(ohttp_relay.to_string())?;
             let response = agent
                 .post(request.url.as_string())
                 .header("Content-Type", request.content_type)
                 .body(request.body)
                 .send()
                 .await?;
-            payjoin_proposal.process_res(&response.bytes().await?, &client_response)?;
+            payjoin_proposal
+                .process_response(&response.bytes().await?, &client_response)
+                .save(&recv_session_persister)?;
 
             // **********************
             // Inside the Sender:
-            // Sender checks, signs, finalizes, extracts, and broadcasts
+            // Sender checks, signs, finalizes, constructs, and broadcasts
             // Replay post fallback to get the response
             let (Request { url, body, content_type, .. }, ohttp_ctx) =
-                send_ctx.extract_req(ohttp_relay.to_string())?;
+                send_ctx.create_poll_request(ohttp_relay.to_string())?;
             let response = agent
                 .post(url.as_string())
                 .header("Content-Type", content_type)
                 .body(body)
                 .send()
                 .await?;
-            let checked_payjoin_proposal_psbt =
-                send_ctx.process_response(&response.bytes().await?, &ohttp_ctx)?.unwrap();
-            let payjoin_tx = extract_pj_tx(&sender, checked_payjoin_proposal_psbt.as_str())?;
+            let checked_payjoin_proposal_psbt = send_ctx
+                .process_response(&response.bytes().await?, &ohttp_ctx)
+                .save(&sender_session_persister)?
+                .success()
+                .unwrap();
+            let payjoin_tx =
+                extract_pj_tx(&sender, checked_payjoin_proposal_psbt.serialize_base64().as_str())?;
             blockchain_client.broadcast(payjoin_tx).unwrap();
             Ok(())
         }
     }
 
     fn handle_directory_proposal(receiver: Wallet, proposal: UncheckedProposal) -> PayjoinProposal {
+        let session_persister = NoopSessionPersister::default();
+        // Receive Check 1: Can Broadcast
+        let proposal = proposal
+            .assume_interactive_receiver()
+            .save(&session_persister)
+            .expect("Noop Persister should not fail");
+        let receiver = Arc::new(receiver);
         // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
         let _to_broadcast_in_failure_case = proposal.extract_tx_to_schedule_broadcast();
 
-        // Receive Check 1: Can Broadcast
-        let proposal = proposal.assume_interactive_receiver();
-        let receiver = Arc::new(receiver);
         // Receive Check 2: receiver can't sign for proposal inputs
         let proposal = proposal
             .check_inputs_not_owned(|script| is_script_owned(&receiver, script.clone()))
+            .save(&session_persister)
             .expect("Receiver should not own any of the inputs");
 
         // Receive Check 3: have we seen this input before? More of a check for non-interactive i.e. payment processor receivers.
         let wants_outputs = proposal
             .check_no_inputs_seen_before(|outpoint| mock_is_output_known(outpoint.clone()))
+            .save(&session_persister)
             .unwrap()
             .identify_receiver_outputs(|script| is_script_owned(&receiver, script.clone()))
+            .save(&session_persister)
             .expect("Receiver should have at least one output");
         _ = wants_outputs.substitute_receiver_script(&bitcoin_ffi::Script::new(
             receiver.get_address(AddressIndex::New).script_pubkey().into_bytes(),
         ));
-        let wants_inputs = wants_outputs.commit_outputs();
-
+        let wants_inputs = wants_outputs
+            .commit_outputs()
+            .save(&session_persister)
+            .expect("Noop Persister should not fail");
         // Select receiver payjoin inputs. TODO Lock them.
         let available_inputs = receiver
             .list_unspent()
@@ -379,11 +403,16 @@ mod v2 {
             .try_preserving_privacy(available_inputs)
             .expect("receiver input that avoids surveillance not found");
 
-        let provisional_proposal =
-            wants_inputs.contribute_inputs(vec![selected_outpoint]).unwrap().commit_inputs();
+        let provisional_proposal = wants_inputs
+            .contribute_inputs(vec![selected_outpoint])
+            .unwrap()
+            .commit_inputs()
+            .save(&session_persister)
+            .expect("Noop Persister should not fail");
 
         let payjoin_proposal = provisional_proposal
             .finalize_proposal(|psbt| process_psbt(&receiver, psbt), Some(10), Some(100))
+            .save(&session_persister)
             .unwrap();
         payjoin_proposal
     }
@@ -408,7 +437,7 @@ fn input_pair_from_local_utxo(utxo: LocalUtxo) -> Result<InputPair, BoxError> {
         previous_output: payjoin::bitcoin::OutPoint::from_str(&utxo.outpoint.to_string()).unwrap(),
         ..Default::default()
     };
-    InputPair::new(txin.clone().into(), psbtin.clone().into())
+    InputPair::new(txin.clone().into(), psbtin.clone().into(), None)
         .map_err(|e| format!("Failed to create input pair: {:?}", e).into())
 }
 
