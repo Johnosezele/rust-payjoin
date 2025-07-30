@@ -41,7 +41,7 @@ where
 {
     let logs = persister
         .load()
-        .map_err(|e| InternalReplayError::PersistenceFailure(Box::new(e).into()))?;
+        .map_err(|e| InternalReplayError::PersistenceFailure(ImplementationError::new(e)))?;
 
     let mut sender = SendSession::Uninitialized;
     let mut history = SessionHistory::default();
@@ -50,9 +50,9 @@ where
         match sender.clone().process_event(log.into()) {
             Ok(next_sender) => sender = next_sender,
             Err(_e) => {
-                persister
-                    .close()
-                    .map_err(|e| InternalReplayError::PersistenceFailure(Box::new(e)))?;
+                persister.close().map_err(|e| {
+                    InternalReplayError::PersistenceFailure(ImplementationError::new(e))
+                })?;
                 break;
             }
         }
@@ -71,14 +71,14 @@ impl SessionHistory {
     pub fn fallback_tx(&self) -> Option<bitcoin::Transaction> {
         self.events.iter().find_map(|event| match event {
             SessionEvent::CreatedReplyKey(proposal) =>
-                Some(proposal.v1.psbt.clone().extract_tx_unchecked_fee_rate()),
+                Some(proposal.psbt_ctx.original_psbt.clone().extract_tx_unchecked_fee_rate()),
             _ => None,
         })
     }
 
     pub fn endpoint(&self) -> Option<&Url> {
         self.events.iter().find_map(|event| match event {
-            SessionEvent::CreatedReplyKey(proposal) => Some(&proposal.v1.endpoint),
+            SessionEvent::CreatedReplyKey(proposal) => Some(&proposal.endpoint),
             _ => None,
         })
     }
@@ -106,7 +106,7 @@ mod tests {
     use crate::persist::test_utils::InMemoryTestPersister;
     use crate::send::v1::SenderBuilder;
     use crate::send::v2::{HpkeContext, Sender};
-    use crate::send::{v1, PsbtContext};
+    use crate::send::PsbtContext;
     use crate::{HpkeKeyPair, Uri, UriExt};
 
     const PJ_URI: &str =
@@ -117,9 +117,9 @@ mod tests {
         let endpoint = Url::parse("http://localhost:1234").expect("Valid URL");
         let keypair = HpkeKeyPair::gen_keypair();
         let sender_with_reply_key = WithReplyKey {
-            v1: v1::Sender {
-                psbt: PARSED_ORIGINAL_PSBT.clone(),
-                endpoint: endpoint.clone(),
+            endpoint: endpoint.clone(),
+            psbt_ctx: PsbtContext {
+                original_psbt: PARSED_ORIGINAL_PSBT.clone(),
                 output_substitution: OutputSubstitution::Enabled,
                 fee_contribution: None,
                 min_fee_rate: FeeRate::ZERO,
@@ -194,8 +194,12 @@ mod tests {
         .unwrap();
         let reply_key = HpkeKeyPair::gen_keypair();
         let endpoint = sender.endpoint().clone();
-        let fallback_tx = sender.psbt.clone().extract_tx_unchecked_fee_rate();
-        let with_reply_key = WithReplyKey { v1: sender, reply_key: reply_key.0 };
+        let fallback_tx = sender.psbt_ctx.original_psbt.clone().extract_tx_unchecked_fee_rate();
+        let with_reply_key = WithReplyKey {
+            endpoint: endpoint.clone(),
+            psbt_ctx: sender.psbt_ctx.clone(),
+            reply_key: reply_key.0,
+        };
         let sender = Sender { state: with_reply_key.clone() };
         let test = SessionHistoryTest {
             events: vec![SessionEvent::CreatedReplyKey(with_reply_key)],

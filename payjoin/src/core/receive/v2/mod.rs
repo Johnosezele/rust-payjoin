@@ -123,6 +123,7 @@ pub enum ReceiveSession {
     OutputsUnknown(Receiver<OutputsUnknown>),
     WantsOutputs(Receiver<WantsOutputs>),
     WantsInputs(Receiver<WantsInputs>),
+    WantsFeeRange(Receiver<WantsFeeRange>),
     ProvisionalProposal(Receiver<ProvisionalProposal>),
     PayjoinProposal(Receiver<PayjoinProposal>),
     TerminalFailure,
@@ -158,8 +159,11 @@ impl ReceiveSession {
             (ReceiveSession::WantsOutputs(state), SessionEvent::WantsInputs(wants_inputs)) =>
                 Ok(state.apply_wants_inputs(wants_inputs)),
 
+            (ReceiveSession::WantsInputs(state), SessionEvent::WantsFeeRange(wants_fee_range)) =>
+                Ok(state.apply_wants_fee_range(wants_fee_range)),
+
             (
-                ReceiveSession::WantsInputs(state),
+                ReceiveSession::WantsFeeRange(state),
                 SessionEvent::ProvisionalProposal(provisional_proposal),
             ) => Ok(state.apply_provisional_proposal(provisional_proposal)),
 
@@ -167,6 +171,7 @@ impl ReceiveSession {
                 ReceiveSession::ProvisionalProposal(state),
                 SessionEvent::PayjoinProposal(payjoin_proposal),
             ) => Ok(state.apply_payjoin_proposal(payjoin_proposal)),
+
             (_, SessionEvent::SessionInvalid(_, _)) => Ok(ReceiveSession::TerminalFailure),
             (current_state, event) => Err(InternalReplayError::InvalidStateAndEvent(
                 Box::new(current_state),
@@ -563,7 +568,7 @@ impl Receiver<MaybeInputsOwned> {
     /// An attacker can try to spend the receiver's own inputs. This check prevents that.
     pub fn check_inputs_not_owned(
         self,
-        is_owned: impl Fn(&Script) -> Result<bool, ImplementationError>,
+        is_owned: &mut impl FnMut(&Script) -> Result<bool, ImplementationError>,
     ) -> MaybeFatalTransition<SessionEvent, Receiver<MaybeInputsSeen>, ReplyableError> {
         let inner = match self.state.v1.clone().check_inputs_not_owned(is_owned) {
             Ok(inner) => inner,
@@ -613,7 +618,7 @@ impl Receiver<MaybeInputsSeen> {
     ///    original proposal PSBT of the current, new payjoin.
     pub fn check_no_inputs_seen_before(
         self,
-        is_known: impl Fn(&OutPoint) -> Result<bool, ImplementationError>,
+        is_known: &mut impl FnMut(&OutPoint) -> Result<bool, ImplementationError>,
     ) -> MaybeFatalTransition<SessionEvent, Receiver<OutputsUnknown>, ReplyableError> {
         let inner = match self.state.v1.clone().check_no_inputs_seen_before(is_known) {
             Ok(inner) => inner,
@@ -668,7 +673,7 @@ impl Receiver<OutputsUnknown> {
     /// outputs.
     pub fn identify_receiver_outputs(
         self,
-        is_receiver_output: impl Fn(&Script) -> Result<bool, ImplementationError>,
+        is_receiver_output: &mut impl FnMut(&Script) -> Result<bool, ImplementationError>,
     ) -> MaybeFatalTransition<SessionEvent, Receiver<WantsOutputs>, ReplyableError> {
         let inner = match self.state.inner.clone().identify_receiver_outputs(is_receiver_output) {
             Ok(inner) => inner,
@@ -804,11 +809,68 @@ impl Receiver<WantsInputs> {
     /// Commits the inputs as final, and moves on to the next typestate.
     ///
     /// Inputs cannot be modified after this function is called.
-    pub fn commit_inputs(self) -> NextStateTransition<SessionEvent, Receiver<ProvisionalProposal>> {
+    pub fn commit_inputs(self) -> NextStateTransition<SessionEvent, Receiver<WantsFeeRange>> {
         let inner = self.state.v1.clone().commit_inputs();
         NextStateTransition::success(
+            SessionEvent::WantsFeeRange(inner.clone()),
+            Receiver { state: WantsFeeRange { v1: inner, context: self.state.context } },
+        )
+    }
+
+    pub(crate) fn apply_wants_fee_range(self, v1: v1::WantsFeeRange) -> ReceiveSession {
+        let new_state = Receiver { state: WantsFeeRange { v1, context: self.state.context } };
+        ReceiveSession::WantsFeeRange(new_state)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WantsFeeRange {
+    v1: v1::WantsFeeRange,
+    context: SessionContext,
+}
+
+impl State for WantsFeeRange {}
+
+impl Receiver<WantsFeeRange> {
+    /// Applies additional fee contribution now that the receiver has contributed inputs
+    /// and may have added new outputs.
+    ///
+    /// How much the receiver ends up paying for fees depends on how much the sender stated they
+    /// were willing to pay in the parameters of the original proposal. For additional
+    /// inputs, fees will be subtracted from the sender's outputs as much as possible until we hit
+    /// the limit the sender specified in the Payjoin parameters. Any remaining fees for the new inputs
+    /// will be then subtracted from the change output of the receiver.
+    /// Fees for additional outputs are always subtracted from the receiver's outputs.
+    ///
+    /// `max_effective_fee_rate` is the maximum effective fee rate that the receiver is
+    /// willing to pay for their own input/output contributions. A `max_effective_fee_rate`
+    /// of zero indicates that the receiver is not willing to pay any additional
+    /// fees. Errors if the final effective fee rate exceeds `max_effective_fee_rate`.
+    ///
+    /// If not provided, `min_fee_rate` and `max_effective_fee_rate` default to the
+    /// minimum possible relay fee.
+    ///
+    /// The minimum effective fee limit is the highest of the minimum limit set by the sender in
+    /// the original proposal parameters and the limit passed in the `min_fee_rate` parameter.
+    pub fn apply_fee_range(
+        self,
+        min_fee_rate: Option<FeeRate>,
+        max_effective_fee_rate: Option<FeeRate>,
+    ) -> MaybeFatalTransition<SessionEvent, Receiver<ProvisionalProposal>, ReplyableError> {
+        let inner = match self.state.v1.apply_fee_range(min_fee_rate, max_effective_fee_rate) {
+            Ok(inner) => inner,
+            Err(e) => {
+                return MaybeFatalTransition::fatal(
+                    SessionEvent::SessionInvalid(e.to_string(), Some(JsonReply::from(&e))),
+                    e,
+                );
+            }
+        };
+        MaybeFatalTransition::success(
             SessionEvent::ProvisionalProposal(inner.clone()),
-            Receiver { state: ProvisionalProposal { v1: inner, context: self.state.context } },
+            Receiver {
+                state: ProvisionalProposal { v1: inner, context: self.state.context.clone() },
+            },
         )
     }
 
@@ -835,34 +897,14 @@ impl Receiver<ProvisionalProposal> {
     /// Finalizes the Payjoin proposal into a PSBT which the sender will find acceptable before
     /// they re-sign the transaction and broadcast it to the network.
     ///
-    /// Finalization consists of multiple steps:
-    ///   1. Apply additional fees to pay for increased weight from any new inputs and/or outputs.
-    ///   2. Remove all sender signatures which were received with the original PSBT as these signatures are now invalid.
-    ///   3. Sign and finalize the resulting PSBT using the passed `wallet_process_psbt` signing function.
-    ///
-    /// How much the receiver ends up paying for fees depends on how much the sender stated they
-    /// were willing to pay in the parameters of the original proposal. For additional
-    /// inputs, fees will be subtracted from the sender's outputs as much as possible until we hit
-    /// the limit the sender specified in the Payjoin parameters. Any remaining fees for the new inputs
-    /// will be then subtracted from the change output of the receiver.
-    ///
-    /// Fees for additional outputs are always subtracted from the receiver's outputs.
-    ///
-    /// The minimum effective fee limit is the highest of the minimum limit set by the sender in
-    /// the original proposal parameters and the limit passed in the `min_fee_rate` parameter.
-    ///
-    /// Errors if the final effective fee rate exceeds `max_effective_fee_rate`.
+    /// Finalization consists of two steps:
+    ///   1. Remove all sender signatures which were received with the original PSBT as these signatures are now invalid.
+    ///   2. Sign and finalize the resulting PSBT using the passed `wallet_process_psbt` signing function.
     pub fn finalize_proposal(
         self,
         wallet_process_psbt: impl Fn(&Psbt) -> Result<Psbt, ImplementationError>,
-        min_fee_rate: Option<FeeRate>,
-        max_effective_fee_rate: Option<FeeRate>,
     ) -> MaybeTransientTransition<SessionEvent, Receiver<PayjoinProposal>, ReplyableError> {
-        let inner = match self.state.v1.clone().finalize_proposal(
-            wallet_process_psbt,
-            min_fee_rate,
-            max_effective_fee_rate,
-        ) {
+        let inner = match self.state.v1.clone().finalize_proposal(wallet_process_psbt) {
             Ok(inner) => inner,
             Err(e) => {
                 // v1::finalize_proposal returns a ReplyableError but the only error that can be returned is ImplementationError from the closure
@@ -929,7 +971,7 @@ impl Receiver<PayjoinProposal> {
                 .context
                 .directory
                 .join(&sender_mailbox.to_string())
-                .map_err(|e| ReplyableError::Implementation(e.into()))?;
+                .map_err(|e| ReplyableError::Implementation(ImplementationError::new(e)))?;
             body = encrypt_message_b(payjoin_bytes, &self.context.s, e)?;
             method = "POST";
         } else {
@@ -940,7 +982,7 @@ impl Receiver<PayjoinProposal> {
                 .context
                 .directory
                 .join(&receiver_mailbox.to_string())
-                .map_err(|e| ReplyableError::Implementation(e.into()))?;
+                .map_err(|e| ReplyableError::Implementation(ImplementationError::new(e)))?;
             method = "PUT";
         }
         log::debug!("Payjoin PSBT target: {}", target_resource.as_str());
@@ -1057,13 +1099,57 @@ pub mod test {
         }
     }
 
+    pub(crate) fn maybe_inputs_owned_v2_from_test_vector() -> MaybeInputsOwned {
+        let pairs = url::form_urlencoded::parse(QUERY_PARAMS.as_bytes());
+        let params = Params::from_query_pairs(pairs, &[Version::Two])
+            .expect("Test utils query params should not fail");
+        MaybeInputsOwned {
+            v1: v1::MaybeInputsOwned { psbt: PARSED_ORIGINAL_PSBT.clone(), params },
+            context: SHARED_CONTEXT.clone(),
+        }
+    }
+
+    #[test]
+    fn test_v2_mutable_receiver_state_closures() {
+        let mut call_count = 0;
+        let maybe_inputs_owned = maybe_inputs_owned_v2_from_test_vector();
+        let receiver = v2::Receiver { state: maybe_inputs_owned };
+
+        fn mock_callback(call_count: &mut usize, ret: bool) -> Result<bool, ImplementationError> {
+            *call_count += 1;
+            Ok(ret)
+        }
+
+        let maybe_inputs_seen =
+            receiver.check_inputs_not_owned(&mut |_| mock_callback(&mut call_count, false));
+        assert_eq!(call_count, 1);
+
+        let outputs_unknown = maybe_inputs_seen
+            .0
+            .map_err(|_| "Check inputs owned closure failed".to_string())
+            .expect("Next receiver state should be accessible")
+            .1
+            .check_no_inputs_seen_before(&mut |_| mock_callback(&mut call_count, false));
+        assert_eq!(call_count, 2);
+
+        let _wants_outputs = outputs_unknown
+            .0
+            .map_err(|_| "Check no inputs seen closure failed".to_string())
+            .expect("Next receiver state should be accessible")
+            .1
+            .identify_receiver_outputs(&mut |_| mock_callback(&mut call_count, true));
+        // there are 2 receiver outputs so we should expect this callback to run twice incrementing
+        // call count twice
+        assert_eq!(call_count, 4);
+    }
+
     #[test]
     fn test_unchecked_proposal_transient_error() -> Result<(), BoxError> {
         let unchecked_proposal = unchecked_proposal_v2_from_test_vector();
         let receiver = v2::Receiver { state: unchecked_proposal };
 
         let unchecked_proposal = receiver.check_broadcast_suitability(Some(FeeRate::MIN), |_| {
-            Err(ImplementationError::from(ReplyableError::Implementation("mock error".into())))
+            Err(ImplementationError::new(ReplyableError::Implementation("mock error".into())))
         });
 
         match unchecked_proposal {
@@ -1085,8 +1171,8 @@ pub mod test {
         let receiver = v2::Receiver { state: unchecked_proposal };
 
         let maybe_inputs_owned = receiver.assume_interactive_receiver();
-        let maybe_inputs_seen = maybe_inputs_owned.0 .1.check_inputs_not_owned(|_| {
-            Err(ImplementationError::from(ReplyableError::Implementation("mock error".into())))
+        let maybe_inputs_seen = maybe_inputs_owned.0 .1.check_inputs_not_owned(&mut |_| {
+            Err(ImplementationError::new(ReplyableError::Implementation("mock error".into())))
         });
 
         match maybe_inputs_seen {
@@ -1108,10 +1194,10 @@ pub mod test {
         let receiver = v2::Receiver { state: unchecked_proposal };
 
         let maybe_inputs_owned = receiver.assume_interactive_receiver();
-        let maybe_inputs_seen = maybe_inputs_owned.0 .1.check_inputs_not_owned(|_| Ok(false));
+        let maybe_inputs_seen = maybe_inputs_owned.0 .1.check_inputs_not_owned(&mut |_| Ok(false));
         let outputs_unknown = match maybe_inputs_seen.0 {
-            Ok(state) => state.1.check_no_inputs_seen_before(|_| {
-                Err(ImplementationError::from(ReplyableError::Implementation("mock error".into())))
+            Ok(state) => state.1.check_no_inputs_seen_before(&mut |_| {
+                Err(ImplementationError::new(ReplyableError::Implementation("mock error".into())))
             }),
             Err(_) => panic!("Expected Ok, got Err"),
         };
@@ -1135,14 +1221,14 @@ pub mod test {
         let receiver = v2::Receiver { state: unchecked_proposal };
 
         let maybe_inputs_owned = receiver.assume_interactive_receiver();
-        let maybe_inputs_seen = maybe_inputs_owned.0 .1.check_inputs_not_owned(|_| Ok(false));
+        let maybe_inputs_seen = maybe_inputs_owned.0 .1.check_inputs_not_owned(&mut |_| Ok(false));
         let outputs_unknown = match maybe_inputs_seen.0 {
-            Ok(state) => state.1.check_no_inputs_seen_before(|_| Ok(false)),
+            Ok(state) => state.1.check_no_inputs_seen_before(&mut |_| Ok(false)),
             Err(_) => panic!("Expected Ok, got Err"),
         };
         let wants_outputs = match outputs_unknown.0 {
-            Ok(state) => state.1.identify_receiver_outputs(|_| {
-                Err(ImplementationError::from(ReplyableError::Implementation("mock error".into())))
+            Ok(state) => state.1.identify_receiver_outputs(&mut |_| {
+                Err(ImplementationError::new(ReplyableError::Implementation("mock error".into())))
             }),
             Err(_) => panic!("Expected Ok, got Err"),
         };

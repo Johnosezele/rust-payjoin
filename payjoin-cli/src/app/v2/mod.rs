@@ -7,13 +7,13 @@ use payjoin::persist::OptionalTransitionOutcome;
 use payjoin::receive::v2::{
     process_err_res, replay_event_log as replay_receiver_event_log, Initialized, MaybeInputsOwned,
     MaybeInputsSeen, OutputsUnknown, PayjoinProposal, ProvisionalProposal, ReceiveSession,
-    Receiver, SessionHistory, UncheckedProposal, WantsInputs, WantsOutputs,
+    Receiver, SessionHistory, UncheckedProposal, WantsFeeRange, WantsInputs, WantsOutputs,
 };
 use payjoin::send::v2::{
     replay_event_log as replay_sender_event_log, SendSession, Sender, SenderBuilder, V2GetContext,
     WithReplyKey,
 };
-use payjoin::Uri;
+use payjoin::{ImplementationError, Uri};
 use tokio::sync::watch;
 
 use super::config::Config;
@@ -302,6 +302,8 @@ impl App {
                     self.commit_outputs(proposal, persister).await,
                 ReceiveSession::WantsInputs(proposal) =>
                     self.contribute_inputs(proposal, persister).await,
+                ReceiveSession::WantsFeeRange(proposal) =>
+                    self.apply_fee_range(proposal, persister).await,
                 ReceiveSession::ProvisionalProposal(proposal) =>
                     self.finalize_proposal(proposal, persister).await,
                 ReceiveSession::PayjoinProposal(proposal) =>
@@ -353,7 +355,11 @@ impl App {
     ) -> Result<()> {
         let wallet = self.wallet();
         let proposal = proposal
-            .check_broadcast_suitability(None, |tx| Ok(wallet.can_broadcast(tx)?))
+            .check_broadcast_suitability(None, |tx| {
+                wallet
+                    .can_broadcast(tx)
+                    .map_err(|e| ImplementationError::from(e.into_boxed_dyn_error()))
+            })
             .save(persister)?;
 
         println!("Fallback transaction received. Consider broadcasting this to get paid if the Payjoin fails:");
@@ -367,8 +373,13 @@ impl App {
         persister: &ReceiverPersister,
     ) -> Result<()> {
         let wallet = self.wallet();
-        let proposal =
-            proposal.check_inputs_not_owned(|input| Ok(wallet.is_mine(input)?)).save(persister)?;
+        let proposal = proposal
+            .check_inputs_not_owned(&mut |input| {
+                wallet
+                    .is_mine(input)
+                    .map_err(|e| ImplementationError::from(e.into_boxed_dyn_error()))
+            })
+            .save(persister)?;
         self.check_no_inputs_seen_before(proposal, persister).await
     }
 
@@ -378,7 +389,9 @@ impl App {
         persister: &ReceiverPersister,
     ) -> Result<()> {
         let proposal = proposal
-            .check_no_inputs_seen_before(|input| Ok(self.db.insert_input_seen_before(*input)?))
+            .check_no_inputs_seen_before(&mut |input| {
+                Ok(self.db.insert_input_seen_before(*input)?)
+            })
             .save(persister)?;
         self.identify_receiver_outputs(proposal, persister).await
     }
@@ -390,7 +403,11 @@ impl App {
     ) -> Result<()> {
         let wallet = self.wallet();
         let proposal = proposal
-            .identify_receiver_outputs(|output_script| Ok(wallet.is_mine(output_script)?))
+            .identify_receiver_outputs(&mut |output_script| {
+                wallet
+                    .is_mine(output_script)
+                    .map_err(|e| ImplementationError::from(e.into_boxed_dyn_error()))
+            })
             .save(persister)?;
         self.commit_outputs(proposal, persister).await
     }
@@ -415,6 +432,15 @@ impl App {
         let selected_input = proposal.try_preserving_privacy(candidate_inputs)?;
         let proposal =
             proposal.contribute_inputs(vec![selected_input])?.commit_inputs().save(persister)?;
+        self.apply_fee_range(proposal, persister).await
+    }
+
+    async fn apply_fee_range(
+        &self,
+        proposal: Receiver<WantsFeeRange>,
+        persister: &ReceiverPersister,
+    ) -> Result<()> {
+        let proposal = proposal.apply_fee_range(None, self.config.max_fee_rate).save(persister)?;
         self.finalize_proposal(proposal, persister).await
     }
 
@@ -425,11 +451,11 @@ impl App {
     ) -> Result<()> {
         let wallet = self.wallet();
         let proposal = proposal
-            .finalize_proposal(
-                |psbt| Ok(wallet.process_psbt(psbt)?),
-                None,
-                self.config.max_fee_rate,
-            )
+            .finalize_proposal(|psbt| {
+                wallet
+                    .process_psbt(psbt)
+                    .map_err(|e| ImplementationError::from(e.into_boxed_dyn_error()))
+            })
             .save(persister)?;
         self.send_payjoin_proposal(proposal, persister).await
     }

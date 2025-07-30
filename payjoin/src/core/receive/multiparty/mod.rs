@@ -112,7 +112,7 @@ pub struct MaybeInputsOwned {
 impl MaybeInputsOwned {
     pub fn check_inputs_not_owned(
         self,
-        is_owned: impl Fn(&bitcoin::Script) -> Result<bool, ImplementationError>,
+        is_owned: &mut impl FnMut(&bitcoin::Script) -> Result<bool, ImplementationError>,
     ) -> Result<MaybeInputsSeen, Error> {
         let inner = self.v1.check_inputs_not_owned(is_owned)?;
         Ok(MaybeInputsSeen { v1: inner, contexts: self.contexts })
@@ -127,7 +127,7 @@ pub struct MaybeInputsSeen {
 impl MaybeInputsSeen {
     pub fn check_no_inputs_seen_before(
         self,
-        is_seen: impl Fn(&bitcoin::OutPoint) -> Result<bool, ImplementationError>,
+        is_seen: &mut impl FnMut(&bitcoin::OutPoint) -> Result<bool, ImplementationError>,
     ) -> Result<OutputsUnknown, Error> {
         let inner = self.v1.check_no_inputs_seen_before(is_seen)?;
         Ok(OutputsUnknown { v1: inner, contexts: self.contexts })
@@ -142,7 +142,7 @@ pub struct OutputsUnknown {
 impl OutputsUnknown {
     pub fn identify_receiver_outputs(
         self,
-        is_receiver_output: impl Fn(&bitcoin::Script) -> Result<bool, ImplementationError>,
+        is_receiver_output: &mut impl FnMut(&bitcoin::Script) -> Result<bool, ImplementationError>,
     ) -> Result<WantsOutputs, Error> {
         let inner = self.v1.identify_receiver_outputs(is_receiver_output)?;
         Ok(WantsOutputs { v1: inner, contexts: self.contexts })
@@ -179,9 +179,25 @@ impl WantsInputs {
 
     /// Proceed to the proposal finalization step.
     /// Inputs cannot be modified after this function is called.
-    pub fn commit_inputs(self) -> ProvisionalProposal {
+    pub fn commit_inputs(self) -> WantsFeeRange {
         let inner = self.v1.commit_inputs();
-        ProvisionalProposal { v1: inner, contexts: self.contexts }
+        WantsFeeRange { v1: inner, contexts: self.contexts }
+    }
+}
+
+pub struct WantsFeeRange {
+    v1: v1::WantsFeeRange,
+    contexts: Vec<SessionContext>,
+}
+
+impl WantsFeeRange {
+    pub fn apply_fee_range(
+        self,
+        min_fee_rate: Option<FeeRate>,
+        max_effective_fee_rate: Option<FeeRate>,
+    ) -> Result<ProvisionalProposal, Error> {
+        let inner = self.v1.apply_fee_range(min_fee_rate, max_effective_fee_rate)?;
+        Ok(ProvisionalProposal { v1: inner, contexts: self.contexts })
     }
 }
 
@@ -194,14 +210,8 @@ impl ProvisionalProposal {
     pub fn finalize_proposal(
         self,
         wallet_process_psbt: impl Fn(&Psbt) -> Result<Psbt, ImplementationError>,
-        min_feerate_sat_per_vb: Option<FeeRate>,
-        max_feerate_sat_per_vb: FeeRate,
     ) -> Result<PayjoinProposal, Error> {
-        let inner = self.v1.finalize_proposal(
-            wallet_process_psbt,
-            min_feerate_sat_per_vb,
-            Some(max_feerate_sat_per_vb),
-        )?;
+        let inner = self.v1.finalize_proposal(wallet_process_psbt)?;
         Ok(PayjoinProposal { v1: inner, contexts: self.contexts })
     }
 }
@@ -352,6 +362,23 @@ mod test {
                 MultipartyError::from(InternalMultipartyError::NotEnoughProposals).to_string()
             ),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_multiparty() -> Result<(), BoxError> {
+        let proposal_one = v2::UncheckedProposal {
+            v1: multiparty_proposals()[0].clone(),
+            context: SHARED_CONTEXT.clone(),
+        };
+        let proposal_two = v2::UncheckedProposal {
+            v1: multiparty_proposals()[1].clone(),
+            context: SHARED_CONTEXT_TWO.clone(),
+        };
+        let mut multiparty = UncheckedProposalBuilder::new();
+        multiparty.add(v2::Receiver { state: proposal_one })?;
+        multiparty.add(v2::Receiver { state: proposal_two })?;
+        assert!(multiparty.build().is_ok());
         Ok(())
     }
 
