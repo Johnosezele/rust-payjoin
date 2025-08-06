@@ -209,10 +209,15 @@ mod integration {
                 let mock_address = Address::from_str("tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4")?
                     .assume_checked();
                 let noop_persister = NoopSessionPersister::default();
-                let mut bad_initializer =
-                    ReceiverBuilder::new(mock_address, directory, bad_ohttp_keys)?
-                        .build()
-                        .save(&noop_persister)?;
+                let mut bad_initializer = Receiver::create_session(
+                    mock_address,
+                    directory,
+                    bad_ohttp_keys,
+                    None,
+                    None,
+                    None,
+                )?
+                .save(&noop_persister)?;
                 let (req, _ctx) = bad_initializer.create_poll_request(&ohttp_relay)?;
                 agent
                     .post(req.url)
@@ -250,10 +255,15 @@ mod integration {
                 // Inside the Receiver:
                 let address = receiver.get_new_address(None, None)?.assume_checked();
                 // test session with expiry in the past
-                let mut expired_receiver = ReceiverBuilder::new(address, directory, ohttp_keys)?
-                    .with_expiry(Duration::from_secs(0))
-                    .build()
-                    .save(&recv_noop_persister)?;
+                let mut expired_receiver = Receiver::create_session(
+                    address,
+                    directory,
+                    ohttp_keys,
+                    Some(Duration::from_secs(0)),
+                    None,
+                    None,
+                )?
+                .save(&recv_noop_persister)?;
                 match expired_receiver.create_poll_request(&ohttp_relay) {
                     // Internal error types are private, so check against a string
                     Err(err) => assert!(err.to_string().contains("expired")),
@@ -303,9 +313,9 @@ mod integration {
                 // Inside the Receiver:
                 let address = receiver.get_new_address(None, None)?.assume_checked();
 
-                let mut session = ReceiverBuilder::new(address, directory, ohttp_keys)?
-                    .build()
-                    .save(&persister)?;
+                let mut session =
+                    Receiver::create_session(address, directory, ohttp_keys, None, None, None)?
+                        .save(&persister)?;
                 println!("session: {:#?}", &session);
                 // Poll receive request
                 let ohttp_relay = services.ohttp_relay_url();
@@ -421,9 +431,9 @@ mod integration {
                 let address = receiver.get_new_address(None, None)?.assume_checked();
 
                 // test session with expiry in the future
-                let mut session = ReceiverBuilder::new(address, directory, ohttp_keys)?
-                    .build()
-                    .save(&recv_persister)?;
+                let mut session =
+                    Receiver::create_session(address, directory, ohttp_keys, None, None, None)?
+                        .save(&recv_persister)?;
                 println!("session: {:#?}", &session);
                 // Poll receive request
                 let ohttp_relay = services.ohttp_relay_url();
@@ -601,10 +611,15 @@ mod integration {
                 let ohttp_keys = services.fetch_ohttp_keys().await?;
                 let recv_persister = NoopSessionPersister::default();
                 let address = receiver.get_new_address(None, None)?.assume_checked();
-                let mut session =
-                    ReceiverBuilder::new(address, directory.clone(), ohttp_keys.clone())?
-                        .build()
-                        .save(&recv_persister)?;
+                let mut session = Receiver::create_session(
+                    address,
+                    directory.clone(),
+                    ohttp_keys.clone(),
+                    None,
+                    None,
+                    None,
+                )?
+                .save(&recv_persister)?;
 
                 // **********************
                 // Inside the V1 Sender:

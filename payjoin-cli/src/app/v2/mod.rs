@@ -159,12 +159,15 @@ impl AppTrait for App {
                 .await?
                 .ohttp_keys;
         let persister = ReceiverPersister::new(self.db.clone())?;
-        let session =
-            ReceiverBuilder::new(address, self.config.v2()?.pj_directory.clone(), ohttp_keys)?
-                .with_amount(amount)
-                .build()
-                .save(&persister)?;
-
+        let session = Receiver::create_session(
+            address,
+            self.config.v2()?.pj_directory.clone(),
+            ohttp_keys,
+            None,
+            Some(amount),
+            self.config.max_fee_rate,
+        )?
+        .save(&persister)?;
         println!("Receive session established");
         let pj_uri = session.pj_uri();
         println!("Request Payjoin by sharing this Payjoin Uri:");

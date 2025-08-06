@@ -255,15 +255,20 @@ impl ReceiverBuilder {
         address: Arc<Address>,
         directory: String,
         ohttp_keys: Arc<OhttpKeys>,
-    ) -> Result<Self, IntoUrlError> {
-        Ok(Self(
-            payjoin::receive::v2::ReceiverBuilder::new(
-                Arc::unwrap_or_clone(address).into(),
-                directory,
-                Arc::unwrap_or_clone(ohttp_keys).into(),
-            )
-            .map_err(IntoUrlError::from)?,
-        ))
+        expire_after: Option<u64>,
+        amount: Option<u64>,
+        max_fee_rate_sat_per_vb: Option<u64>,
+    ) -> Result<InitialReceiveTransition, IntoUrlError> {
+        payjoin::receive::v2::Receiver::create_session(
+            (*address).clone().into(),
+            directory,
+            (*ohttp_keys).clone().into(),
+            expire_after.map(Duration::from_secs),
+            amount.map(payjoin::bitcoin::Amount::from_sat),
+            max_fee_rate_sat_per_vb.and_then(FeeRate::from_sat_per_vb),
+        )
+        .map_err(Into::into)
+        .map(|session| InitialReceiveTransition(Arc::new(RwLock::new(Some(session)))))
     }
 
     pub fn with_amount(&self, amount_sats: u64) -> Self {

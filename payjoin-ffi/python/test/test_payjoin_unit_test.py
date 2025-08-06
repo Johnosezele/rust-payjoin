@@ -54,7 +54,10 @@ class TestReceiverPersistence(unittest.TestCase):
             address, 
             "https://example.com", 
             payjoin.OhttpKeys.from_string("OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC"), 
-        ).build().save(persister)
+            None,
+            None,
+            None,
+        ).save(persister)
         result = payjoin.payjoin_ffi.replay_receiver_event_log(persister)
         self.assertTrue(result.state().is_INITIALIZED())
 
@@ -82,7 +85,14 @@ class TestSenderPersistence(unittest.TestCase):
             address, 
             "https://example.com", 
             payjoin.OhttpKeys.from_string("OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC"), 
+<<<<<<< HEAD
         ).build().save(persister)
+=======
+            None,
+            None,
+            None,
+        ).save(persister)
+>>>>>>> e8680de (Implement sticky max fee rate per payjoin session)
         uri = receiver.pj_uri()
 
         persister = InMemorySenderPersister(1)

@@ -103,12 +103,16 @@ void main() {
       var persister = InMemoryReceiverPersister("1");
       var address = bitcoin.Address(
           "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4", bitcoin.Network.signet);
-      payjoin.ReceiverBuilder(
-        address,
-        "https://example.com",
-        payjoin.OhttpKeys.fromString(
-            "OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC"),
-      ).build().save(persister);
+      payjoin.UninitializedReceiver()
+          .createSession(
+              address,
+              "https://example.com",
+              payjoin.OhttpKeys.fromString(
+                  "OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC"),
+              null,
+              null,
+              null)
+          .save(persister);
       final result = payjoin.replayReceiverEventLog(persister);
       expect(result, isA<payjoin.ReplayResult>(),
           reason: "persistence should return a replay result");
@@ -123,9 +127,10 @@ void main() {
               "https://example.com",
               payjoin.OhttpKeys.fromString(
                   "OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC"),
-        )
-        .build()
-        .save(receiver_persister);
+              null,
+              null,
+              null)
+          .save(receiver_persister);
       var uri = receiver.pjUri();
 
       var sender_persister = InMemorySenderPersister("1");
