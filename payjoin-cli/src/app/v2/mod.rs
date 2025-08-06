@@ -106,6 +106,7 @@ impl AppTrait for App {
             self.config.v2()?.pj_directory.clone(),
             ohttp_keys,
             None,
+            self.config.max_fee_rate,
         )
         .save(&persister)?;
         println!("Receive session established");
@@ -440,7 +441,7 @@ impl App {
         proposal: Receiver<WantsFeeRange>,
         persister: &ReceiverPersister,
     ) -> Result<()> {
-        let proposal = proposal.apply_fee_range(None, self.config.max_fee_rate).save(persister)?;
+        let proposal = proposal.apply_fee_range(None, None).save(persister)?;
         self.finalize_proposal(proposal, persister).await
     }
 

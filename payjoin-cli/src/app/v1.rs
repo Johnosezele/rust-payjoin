@@ -147,7 +147,7 @@ impl App {
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             listener.local_addr()?
         );
-        println!("{}", pj_uri_string);
+        println!("{pj_uri_string}");
 
         let app = self.clone();
 
@@ -361,8 +361,8 @@ impl App {
 
         let wants_fee_range = try_contributing_inputs(payjoin.clone(), &self.wallet)
             .map_err(ReplyableError::Implementation)?;
-        let provisional_payjoin =
-            wants_fee_range.apply_fee_range(None, self.config.max_fee_rate)?;
+        let max_fee_rate = self.config.max_fee_rate.unwrap_or(FeeRate::BROADCAST_MIN);
+        let provisional_payjoin = wants_fee_range.apply_fee_range(None, Some(max_fee_rate))?;
 
         let payjoin_proposal = provisional_payjoin.finalize_proposal(|psbt| {
             self.wallet
