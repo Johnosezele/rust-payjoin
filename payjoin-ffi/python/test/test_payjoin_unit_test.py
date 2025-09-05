@@ -57,6 +57,8 @@ class TestReceiverPersistence(unittest.TestCase):
             None,
             None,
             None,
+            None,
+            None,
         ).save(persister)
         result = payjoin.payjoin_ffi.replay_receiver_event_log(persister)
         self.assertTrue(result.state().is_INITIALIZED())
@@ -88,6 +90,8 @@ class TestSenderPersistence(unittest.TestCase):
 <<<<<<< HEAD
         ).build().save(persister)
 =======
+            None,
+            None,
             None,
             None,
             None,
