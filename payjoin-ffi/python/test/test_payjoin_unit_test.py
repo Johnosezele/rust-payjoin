@@ -91,6 +91,8 @@ class TestSenderPersistence(unittest.TestCase):
             None,
             None,
             None,
+            None,
+            None,
         ).save(persister)
 >>>>>>> e8680de (Implement sticky max fee rate per payjoin session)
         uri = receiver.pj_uri()
